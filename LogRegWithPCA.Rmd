@@ -1,0 +1,190 @@
+---
+title: "Regresión Logística usando PCA"
+description: |
+  Análisis sobre datos de calidad del vino.
+author:
+  - name: Ignacio Ibarra
+    url: https://github.com/Ignacio-Ibarra
+    affiliation: Maestría en Data Mining & KDD (FCEyN-UBA)
+    affiliation_url: http://datamining.dc.uba.ar/datamining/
+date: "`r Sys.Date()`"
+output: 
+  distill::distill_article:
+    toc: true
+    number_sections: true
+    toc_depth: 4
+    code_folding: true
+          
+          
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{css, include = FALSE}
+d-article p {
+  text-align: justify;
+}
+```
+
+
+El presente trabajo analiza una [muestra](https://archive.ics.uci.edu/ml/datasets/wine+quality
+) de 6.497 registros, la cual reporta distintas variedades y calidades de vinos con sus respectivas características químicas. Se aplica PCA y Regresión Logística para predecir la variead de un vino dadas sus características fisico-químicas. 
+
+
+```{r, echo = FALSE}
+#Cargo Paquetes
+# install.packages("vtable")
+# install.packages("distill")
+# install.packages("tidyverse")
+# install.packages("kableExtra")
+# install.packages("rmarkdown")
+# install.packages("reshape2")
+# install.packages("gridExtra")
+# install.packages("factoextra")
+# install.packages("ggfortify")
+# install.packages("ggpubr")
+# install.packages("mlr")
+require(mlr)
+require(ggpubr)
+require(ggfortify)
+require(kableExtra)
+require(vtable)
+require(tidyverse)
+require(readxl)
+require(stringi)
+require(stringr)
+require(rmarkdown)
+require(factoextra)
+require(reshape2)
+require(grid)
+require(gridExtra)
+#---------------------------
+# Seteo theme para pĺots
+theme <- theme(text = element_text(size=10),plot.title = element_text(size=12, face="bold.italic",
+               hjust = 0.5), axis.title.x = element_text(size=10, face="bold", colour='black'),
+               axis.title.y = element_text(size=10, face="bold"))
+#----------------------------------------------------
+
+#Cargo datasets y trabajo con features numéricas
+df <- read_excel("./data/winequality.xlsx")
+
+# #Muestra Balanceada
+# var1 <- df[df$variedad==1,]
+# var2 <- df[df$variedad==2,]
+# set.seed(792)
+# sampleo1 <- sample(1:nrow(var1), size=1000, replace = F)
+# sampleo2 <- sample(1:nrow(var2), size=1000, replace = F)
+# var1 <- var1[sampleo1,]
+# var2 <- var2[sampleo2,]
+# 
+# #Piso de nuevo la variable df
+# df <- rbind(var1,var2)
+
+#Pasamos a categóricas las variables calidad y variedad
+df$cat.calidad <- factor(df$calidad,  ordered = TRUE)
+df$variedad <- as.factor(df$variedad)
+names(df) <- stringi::stri_trans_general(str = names(df), id = "Latin-ASCII")
+names(df) <- stringr::str_replace_all(names(df), " ", "_")
+```
+
+# Análisis de Componentes Principales
+
+Se realizó análisis de componentes principales sobre doce atributos, todos numéricos. A continuación se observa el biplot con todas las coordenadas de las primeras dos componentes principales. 
+
+```{r, layout="l-body-outset", fig.cap = "PCA: biplot"}
+
+num.cols<- unlist(lapply(names(df), function(x){
+                          if (is.numeric(unlist(df[,x]))){return(x)}
+                                                        }))
+# num.cols <- num.cols[num.cols!="calidad"] #la columna calidad sigue siendo numérica no fue sacada dado que se usa más adelante nuevamente con otra transformación 
+
+dfnum <- df[,num.cols]
+pca <- prcomp(dfnum, scale=T)
+
+autoplot(pca, 
+         data = df, 
+         colour = 'variedad',
+         loadings = TRUE, 
+         loadings.colour = 'black',
+         loadings.label = TRUE, 
+         loadings.label.size = 3)+
+  xlim(-0.06,0.06)
+```
+
+Los vinos de variedad 1 poseen mayores proporciones de anhidrido sulfuroso libre y total, mayor nivel de alcohol y mayor nivel de azúcar residual. En cambio, los vinos de variedad 2 poseen mayores proporciones de acidez volátil, cloruros, densidad. 
+
+# Regresión logística $+$ PCA
+
+```{r}
+all.data <- as.data.frame(cbind(dfnum, variedad = df$variedad))
+
+#train y test
+set.seed(1409) # para asegurar reproducibilidad
+dt = sort(sample(nrow(all.data), nrow(all.data)*.7))
+datos_tr<-all.data[dt,]
+datos_te<-all.data[-dt,]
+
+# Se realiza el escalado/estandarización con ->  (x - mean(x)) / sd(x)
+
+# Calculo media y sd de subconjunto de entrenamiento (train), y con esos datos hago el escalado del test. La idea de escalar el conjunto de test (prueba) utilizando datos solamente de train es para evitar el data leakeage.
+
+# Hago escalado a mano del test set con media del training, y sd del training
+for (k in 1:12){datos_te[,k]=(datos_te[,k]-mean(datos_tr[,k]))/sd(datos_tr[,k])}
+
+# Hago automáticamente con la función scale, el escalado de training, y le vuelvo a sumar las columnas sex y diagnosis 
+datos_tr = as.data.frame(scale(datos_tr[,1:12]))
+datos_tr$variedad <- all.data[dt,]$variedad
+
+# chequeo el balance de las distintas clases de  la variable variedad en el conjunto de todos los datos, los datos de prueba y los datos de entramiento.
+Entrenamiento <- table(datos_tr$variedad) 
+Prueba <- table(datos_te$variedad) 
+Total <- table(all.data$variedad) 
+kable(rbind(Entrenamiento, Prueba,Total), caption = "Pesos Clases en Train y Test")
+```
+
+
+## Modelo
+
+Obtengo los loadings de PCA con datos de training y mediante un simple producto de matrices obtengo las coordenadas de los datos de test expresadas mediante los loadings de los datos de train. Luego instancio el modelo, realizo entrenamiento y obtengo $\textit{accuracy}$ en el set de prueba. 
+
+```{r}
+
+pca.train <- prcomp(datos_tr[,1:12], scale=T)
+a = pca.train$rotation
+pca.test <- data.matrix(datos_te[,1:12]) %*% data.matrix(a)
+
+datos_tr <- data.frame(cbind(pca.train$x, variedad = datos_tr$variedad))
+datos_te <- data.frame(cbind(pca.test, variedad = datos_te$variedad))
+#-----------------------------------------
+# Armo modelo de regresión logistica. 
+set.seed(1)
+datos_tr$variedad <- as.factor(datos_tr$variedad)
+datos_te$variedad <- as.factor(datos_te$variedad)
+task = makeClassifTask(data = datos_tr, target = "variedad") 
+lrn = makeLearner("classif.logreg", predict.type = "prob")
+mod_lr = mlr::train(lrn, task)
+# Predicción en TEST
+pred_lr= predict(mod_lr, newdata = datos_te)
+acc_lg1 <- round(measureACC(as.data.frame(pred_lr)$truth, as.data.frame(pred_lr)$response),3)
+
+acc_lg1
+```
+
+
+*Matriz de Confusión (poco confundida)*
+
+```{r}
+
+table(as.data.frame(pred_lr)$truth, as.data.frame(pred_lr)$response)
+```
+
+
+Esta es la razón por la cual la prediccion es tan buena. Usando los loadings de pca training logramos obtener datos en test cuyos fetaures tienen muy baja colinealidad. 
+
+```{r}
+
+round(cor(datos_te[,1:12]),2)
+
+```
+
